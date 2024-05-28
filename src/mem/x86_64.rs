@@ -37,14 +37,7 @@ pub unsafe fn copy_forward(dest: *mut u8, src: *const u8, count: usize) {
 #[cfg(not(target_feature = "ermsb"))]
 pub unsafe fn copy_forward(mut dest: *mut u8, mut src: *const u8, count: usize) {
     let (pre_byte_count, qword_count, byte_count) = rep_param(dest, count);
-    // Separating the blocks gives the compiler more freedom to reorder instructions.
-    asm!(
-        "rep movsb",
-        inout("ecx") pre_byte_count => _,
-        inout("rdi") dest => dest,
-        inout("rsi") src => src,
-        options(att_syntax, nostack, preserves_flags)
-    );
+    (dest, src) = copy_forward_short(dest, src, pre_byte_count);
     asm!(
         "rep movsq",
         inout("rcx") qword_count => _,
@@ -52,13 +45,32 @@ pub unsafe fn copy_forward(mut dest: *mut u8, mut src: *const u8, count: usize) 
         inout("rsi") src => src,
         options(att_syntax, nostack, preserves_flags)
     );
-    asm!(
-        "rep movsb",
-        inout("ecx") byte_count => _,
-        inout("rdi") dest => _,
-        inout("rsi") src => _,
-        options(att_syntax, nostack, preserves_flags)
-    );
+    copy_forward_short(dest, src, byte_count);
+}
+
+#[inline(always)]
+#[cfg(not(target_feature = "ermsb"))]
+unsafe fn copy_forward_short(
+    mut dest: *mut u8,
+    mut src: *const u8,
+    count: usize,
+) -> (*mut u8, *const u8) {
+    if (count & 4) != 0 {
+        dest.cast::<u32>().write(src.cast::<u32>().read());
+        dest = dest.byte_add(4);
+        src = src.byte_add(4);
+    }
+    if (count & 2) != 0 {
+        dest.cast::<u16>().write(src.cast::<u16>().read());
+        dest = dest.byte_add(2);
+        src = src.byte_add(2);
+    }
+    if (count & 1) != 0 {
+        dest.write(src.read());
+        dest = dest.byte_add(1);
+        src = src.byte_add(1);
+    }
+    (dest, src)
 }
 
 #[inline(always)]
@@ -304,6 +316,7 @@ pub unsafe fn c_string_length(mut s: *const core::ffi::c_char) -> usize {
 }
 
 /// Determine optimal parameters for a `rep` instruction.
+#[inline(always)]
 fn rep_param(dest: *mut u8, mut count: usize) -> (usize, usize, usize) {
     // Unaligned writes are still slow on modern processors, so align the destination address.
     let pre_byte_count = ((8 - (dest as usize & 0b111)) & 0b111).min(count);
